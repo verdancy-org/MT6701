@@ -5,7 +5,7 @@
 module_description: MT6701 SSI angle sensor driver
 constructor_args: []
 template_args: []
-required_hardware: [mt6701_spi, mt6701_spi_cs, mt6701_int]
+required_hardware: [mt6701_spi, mt6701_spi_cs]
 depends: []
 === END MANIFEST === */
 // clang-format on
@@ -25,9 +25,6 @@ class MT6701 : public LibXR::Application
   MT6701(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app)
       : mt6701_spi_(hw.template FindOrExit<LibXR::SPI>({"mt6701_spi"})),
         mt6701_spi_cs_(hw.template FindOrExit<LibXR::GPIO>({"mt6701_spi_cs"})),
-        mt6701_int_(hw.template FindOrExit<LibXR::GPIO>({"mt6701_int"})),
-        data_ready_cb_(LibXR::GPIO::Callback::Create(
-            [](bool in_isr, MT6701* self) { self->OnDataReady(in_isr); }, this)),
         spi_done_cb_(LibXR::Callback<LibXR::ErrorCode>::Create(
             [](bool in_isr, MT6701* self, LibXR::ErrorCode err)
             { self->OnTransferDone(in_isr, err); }, this)),
@@ -37,7 +34,6 @@ class MT6701 : public LibXR::Application
 
     mt6701_spi_cs_->Write(true);
     ASSERT(ConfigureSPI() == LibXR::ErrorCode::OK);
-    ConfigureInterrupt();
     Start();
   }
 
@@ -45,17 +41,14 @@ class MT6701 : public LibXR::Application
 
   void Start()
   {
-    if (mt6701_int_->EnableInterrupt() == LibXR::ErrorCode::OK)
+    const bool WAS_RUNNING = running_.exchange(true, std::memory_order_acq_rel);
+    if (!WAS_RUNNING)
     {
-      running_.store(true, std::memory_order_release);
+      TryStartTransfer(false);
     }
   }
 
-  void Stop()
-  {
-    running_.store(false, std::memory_order_release);
-    (void)(mt6701_int_->DisableInterrupt());
-  }
+  void Stop() { running_.store(false, std::memory_order_release); }
 
   [[nodiscard]] float ReadAngleRad()
   {
@@ -167,25 +160,6 @@ class MT6701 : public LibXR::Application
     cache_valid_.store(true, std::memory_order_release);
   }
 
-  void ConfigureInterrupt()
-  {
-    LibXR::GPIO::Configuration cfg = {};
-    cfg.direction = LibXR::GPIO::Direction::FALL_INTERRUPT;
-    cfg.pull = LibXR::GPIO::Pull::NONE;
-    ASSERT(mt6701_int_->SetConfig(cfg) == LibXR::ErrorCode::OK);
-    ASSERT(mt6701_int_->RegisterCallback(data_ready_cb_) == LibXR::ErrorCode::OK);
-  }
-
-  void OnDataReady(bool in_isr)
-  {
-    if (!running_.load(std::memory_order_acquire))
-    {
-      return;
-    }
-    trigger_latched_.store(true, std::memory_order_release);
-    TryStartTransfer(in_isr);
-  }
-
   void OnTransferDone(bool in_isr, LibXR::ErrorCode err)
   {
     mt6701_spi_cs_->Write(true);
@@ -212,7 +186,7 @@ class MT6701 : public LibXR::Application
 
     transfer_pending_.store(false, std::memory_order_release);
 
-    if (trigger_latched_.load(std::memory_order_acquire))
+    if (running_.load(std::memory_order_acquire))
     {
       TryStartTransfer(in_isr);
     }
@@ -232,7 +206,6 @@ class MT6701 : public LibXR::Application
       return;
     }
 
-    trigger_latched_.store(false, std::memory_order_release);
     mt6701_spi_cs_->Write(false);
     LibXR::ErrorCode err = mt6701_spi_->ReadAndWrite(
         LibXR::RawData(rx_buf_, sizeof(rx_buf_)),
@@ -253,15 +226,12 @@ class MT6701 : public LibXR::Application
 
   LibXR::SPI* mt6701_spi_;
   LibXR::GPIO* mt6701_spi_cs_;
-  LibXR::GPIO* mt6701_int_;
-  LibXR::GPIO::Callback data_ready_cb_;
   LibXR::Callback<LibXR::ErrorCode> spi_done_cb_;
   LibXR::SPI::OperationRW spi_op_;
   std::atomic<uint32_t> cache_seq_{0u};
   std::atomic<bool> cache_valid_{false};
   std::atomic<bool> running_{false};
   std::atomic<bool> transfer_pending_{false};
-  std::atomic<bool> trigger_latched_{false};
   CacheData cache_data_ = {};
   uint8_t tx_buf_[3] = {0u, 0u, 0u};
   uint8_t rx_buf_[3] = {0u, 0u, 0u};
