@@ -3,9 +3,11 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: MT6701 SSI angle sensor driver
-constructor_args: []
+constructor_args:
+  spi_alias: "mt6701_spi"
+  cs_alias: "mt6701_spi_cs"
 template_args: []
-required_hardware: [mt6701_spi, mt6701_spi_cs]
+required_hardware: []
 depends: []
 === END MANIFEST === */
 // clang-format on
@@ -14,7 +16,6 @@ depends: []
 #include <cstdint>
 
 #include "app_framework.hpp"
-#include "crc.hpp"
 #include "gpio.hpp"
 #include "libxr_def.hpp"
 #include "spi.hpp"
@@ -22,9 +23,11 @@ depends: []
 class MT6701 : public LibXR::Application
 {
  public:
-  MT6701(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app)
-      : mt6701_spi_(hw.template FindOrExit<LibXR::SPI>({"mt6701_spi"})),
-        mt6701_spi_cs_(hw.template FindOrExit<LibXR::GPIO>({"mt6701_spi_cs"})),
+  MT6701(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+         const char* spi_alias = "mt6701_spi",
+         const char* cs_alias = "mt6701_spi_cs")
+      : mt6701_spi_(hw.template FindOrExit<LibXR::SPI>({spi_alias})),
+        mt6701_spi_cs_(hw.template FindOrExit<LibXR::GPIO>({cs_alias})),
         spi_done_cb_(LibXR::Callback<LibXR::ErrorCode>::Create(
             [](bool in_isr, MT6701* self, LibXR::ErrorCode err)
             { self->OnTransferDone(in_isr, err); }, this)),
@@ -139,8 +142,7 @@ class MT6701 : public LibXR::Application
   static bool DecodeFrame(uint32_t frame24, float& angle_rad)
   {
     const uint8_t CRC_RX = static_cast<uint8_t>(frame24 & 0x3Fu);
-    const uint8_t CRC_CALC =
-        LibXR::CRC6::CalculateBits((frame24 >> 6) & PAYLOAD_MASK, 18);
+    const uint8_t CRC_CALC = CalculateCrc6((frame24 >> 6) & PAYLOAD_MASK);
     if (CRC_RX != CRC_CALC)
     {
       return false;
@@ -149,6 +151,23 @@ class MT6701 : public LibXR::Application
     const uint16_t RAW14 = static_cast<uint16_t>((frame24 >> 10) & 0x3FFFu);
     angle_rad = static_cast<float>(RAW14) * RAD_PER_LSB;
     return true;
+  }
+
+  static uint8_t CalculateCrc6(uint32_t payload18)
+  {
+    constexpr uint32_t CRC_WIDTH = 6u;
+    constexpr uint32_t CRC_MASK = 0x3Fu;
+    constexpr uint32_t CRC_POLY = 0x43u;  // x^6 + x + 1, MSB-first
+
+    uint32_t reg = (payload18 & PAYLOAD_MASK) << CRC_WIDTH;
+    for (int bit = 23; bit >= static_cast<int>(CRC_WIDTH); --bit)
+    {
+      if ((reg & (1u << static_cast<uint32_t>(bit))) != 0u)
+      {
+        reg ^= CRC_POLY << static_cast<uint32_t>(bit - CRC_WIDTH);
+      }
+    }
+    return static_cast<uint8_t>(reg & CRC_MASK);
   }
 
   void StoreSample(float angle_rad, uint8_t raw_mg)
