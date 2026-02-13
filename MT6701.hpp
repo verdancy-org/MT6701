@@ -24,8 +24,7 @@ class MT6701 : public LibXR::Application
 {
  public:
   MT6701(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-         const char* spi_alias = "mt6701_spi",
-         const char* cs_alias = "mt6701_spi_cs")
+         const char* spi_alias = "mt6701_spi", const char* cs_alias = "mt6701_spi_cs")
       : mt6701_spi_(hw.template FindOrExit<LibXR::SPI>({spi_alias})),
         mt6701_spi_cs_(hw.template FindOrExit<LibXR::GPIO>({cs_alias})),
         spi_done_cb_(LibXR::Callback<LibXR::ErrorCode>::Create(
@@ -40,7 +39,17 @@ class MT6701 : public LibXR::Application
     Start();
   }
 
-  void OnMonitor() override {}
+  void OnMonitor() override
+  {
+    if (!running_.load(std::memory_order_acquire))
+    {
+      return;
+    }
+    if (!transfer_pending_.load(std::memory_order_acquire))
+    {
+      TryStartTransfer(false);
+    }
+  }
 
   void Start()
   {
@@ -53,7 +62,7 @@ class MT6701 : public LibXR::Application
 
   void Stop() { running_.store(false, std::memory_order_release); }
 
-  [[nodiscard]] float ReadAngleRad()
+  [[nodiscard]] float Read()
   {
     CacheData cache = {};
     if (LoadCache(cache) != LibXR::ErrorCode::OK)
@@ -92,13 +101,7 @@ class MT6701 : public LibXR::Application
   static constexpr float RAD_PER_LSB =
       6.28318530717958647692f / static_cast<float>(ANGLE_RESOLUTION);
 
-  LibXR::ErrorCode ConfigureSPI() const
-  {
-    auto cfg = mt6701_spi_->GetConfig();
-    cfg.clock_polarity = LibXR::SPI::ClockPolarity::HIGH;
-    cfg.clock_phase = LibXR::SPI::ClockPhase::EDGE_1;
-    return mt6701_spi_->SetConfig(cfg);
-  }
+  LibXR::ErrorCode ConfigureSPI() const { return LibXR::ErrorCode::OK; }
 
   struct CacheData
   {
@@ -186,8 +189,6 @@ class MT6701 : public LibXR::Application
     if (err != LibXR::ErrorCode::OK)
     {
       transfer_pending_.store(false, std::memory_order_release);
-      running_.store(false, std::memory_order_release);
-      ASSERT_FROM_CALLBACK(false, in_isr);
       return;
     }
 
@@ -205,7 +206,7 @@ class MT6701 : public LibXR::Application
 
     transfer_pending_.store(false, std::memory_order_release);
 
-    if (running_.load(std::memory_order_acquire))
+    if (in_isr && running_.load(std::memory_order_acquire))
     {
       TryStartTransfer(in_isr);
     }
@@ -233,13 +234,7 @@ class MT6701 : public LibXR::Application
     {
       mt6701_spi_cs_->Write(true);
       transfer_pending_.store(false, std::memory_order_release);
-      running_.store(false, std::memory_order_release);
-      ASSERT_FROM_CALLBACK(false, in_isr);
-    }
-    if (in_isr && !transfer_pending_.load(std::memory_order_acquire))
-    {
-      running_.store(false, std::memory_order_release);
-      ASSERT_FROM_CALLBACK(false, in_isr);
+      return;
     }
   }
 
